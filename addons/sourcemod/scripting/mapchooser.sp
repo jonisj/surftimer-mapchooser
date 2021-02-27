@@ -43,10 +43,10 @@
 public Plugin myinfo =
 {
 	name = "SurfTimer MapChooser",
-	author = "AlliedModders LLC & Ace",
-	description = "Automated Map Voting",
-	version = SOURCEMOD_VERSION,
-	url = "http://www.sourcemod.net/"
+	author = "AlliedModders LLC & jonisj",
+	description = "Automated Map Voting with a SurfTimer integration",
+	version = "1.0",
+	url = "https://github.com/jonisj/surftimer-mapchooser"
 };
 
 /* Valve ConVars */
@@ -71,9 +71,6 @@ ConVar g_Cvar_EndOfMapVote;
 ConVar g_Cvar_VoteDuration;
 ConVar g_Cvar_RunOff;
 ConVar g_Cvar_RunOffPercent;
-ConVar g_Cvar_ServerTier;
-ConVar g_Cvar_PointsRequirement;
-ConVar g_Cvar_RankRequirement;
 
 Handle g_VoteTimer = null;
 Handle g_RetryTimer = null;
@@ -96,12 +93,12 @@ bool g_WaitingForVote;
 bool g_MapVoteCompleted;
 bool g_ChangeMapAtRoundEnd;
 bool g_ChangeMapInProgress;
-// int g_mapFileSerial = -1;
+int g_mapFileSerial = -1;
 
 MapChange g_ChangeTime;
 
-Handle g_NominationsResetForward = null;
-Handle g_MapVoteStartedForward = null;
+GlobalForward g_NominationsResetForward;
+GlobalForward g_MapVoteStartedForward;
 
 // SQL Connection
 Handle g_hDb = null;
@@ -118,7 +115,7 @@ public void OnPluginStart()
 {
 	LoadTranslations("mapchooser.phrases");
 	LoadTranslations("common.phrases");
-
+	
 	db_setupDatabase();
 	
 	int arraySize = ByteCountToCells(PLATFORM_MAX_PATH);
@@ -143,7 +140,7 @@ public void OnPluginStart()
 	g_Cvar_Extend = CreateConVar("sm_mapvote_extend", "0", "Number of extensions allowed each map.", _, true, 0.0);
 	g_Cvar_DontChange = CreateConVar("sm_mapvote_dontchange", "1", "Specifies if a 'Don't Change' option should be added to early votes", _, true, 0.0);
 	g_Cvar_VoteDuration = CreateConVar("sm_mapvote_voteduration", "20", "Specifies how long the mapvote should be available for.", _, true, 5.0);
-	g_Cvar_RunOff = CreateConVar("sm_mapvote_runoff", "0", "Hold run of votes if winning choice is less than a certain margin", _, true, 0.0, true, 1.0);
+	g_Cvar_RunOff = CreateConVar("sm_mapvote_runoff", "0", "Hold runoff votes if winning choice is less than a certain margin", _, true, 0.0, true, 1.0);
 	g_Cvar_RunOffPercent = CreateConVar("sm_mapvote_runoffpercent", "50", "If winning choice has less than this percent of votes, hold a runoff", _, true, 0.0, true, 100.0);
 	
 	RegAdminCmd("sm_mapvote", Command_Mapvote, ADMFLAG_CHANGEMAP, "sm_mapvote - Forces MapChooser to attempt to run a map vote now.");
@@ -153,8 +150,6 @@ public void OnPluginStart()
 	g_Cvar_Maxrounds = FindConVar("mp_maxrounds");
 	g_Cvar_Fraglimit = FindConVar("mp_fraglimit");
 	g_Cvar_Bonusroundtime = FindConVar("mp_bonusroundtime");
-
-	
 	
 	if (g_Cvar_Winlimit || g_Cvar_Maxrounds)
 	{
@@ -195,8 +190,8 @@ public void OnPluginStart()
 		g_Cvar_Bonusroundtime.SetBounds(ConVarBound_Upper, true, 30.0);		
 	}
 	
-	g_NominationsResetForward = CreateGlobalForward("OnNominationRemoved", ET_Ignore, Param_String, Param_Cell);
-	g_MapVoteStartedForward = CreateGlobalForward("OnMapVoteStarted", ET_Ignore);
+	g_NominationsResetForward = new GlobalForward("OnNominationRemoved", ET_Ignore, Param_String, Param_Cell);
+	g_MapVoteStartedForward = new GlobalForward("OnMapVoteStarted", ET_Ignore);
 }
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
@@ -218,19 +213,19 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 
 public void OnConfigsExecuted()
 {
-	// if (ReadMapList(g_MapList,
-	// 				 g_mapFileSerial, 
-	// 				 "mapchooser",
-	// 				 MAPLIST_FLAG_CLEARARRAY|MAPLIST_FLAG_MAPSFOLDER)
-	// 	!= null)
+	if (ReadMapList(g_MapList,
+					 g_mapFileSerial, 
+					 "mapchooser",
+					 MAPLIST_FLAG_CLEARARRAY|MAPLIST_FLAG_MAPSFOLDER)
+		!= null)
 		
-	// {
-	// 	if (g_mapFileSerial == -1)
-	// 	{
-	// 		LogError("Unable to create a valid map list.");
-	// 	}
-	// }
-
+	{
+		if (g_mapFileSerial == -1)
+		{
+			LogError("Unable to create a valid map list.");
+		}
+	}
+	
 	SelectMapList();
 	
 	CreateNextVote();
@@ -249,7 +244,6 @@ public void OnConfigsExecuted()
 	{
 		g_winCount[i] = 0;	
 	}
-	
 
 	/* Check if mapchooser will attempt to start mapvote during bonus round time - TF2 Only */
 	if (g_Cvar_Bonusroundtime && !g_Cvar_StartRounds.IntValue)
@@ -707,13 +701,18 @@ void InitiateVote(MapChange when, ArrayList inputlist=null)
 	int voteDuration = g_Cvar_VoteDuration.IntValue;
 
 	g_VoteMenu.ExitButton = false;
-	DisplayVoteToPros(voteDuration, 0, g_VoteMenu);
+	g_VoteMenu.DisplayVoteToAll(voteDuration);
 
 	LogAction(-1, -1, "Voting for next map has started.");
 	PrintToChatAll("[SM] %t", "Nextmap Voting Started");
 }
 
-public void Handler_VoteFinishedGeneric(Menu menu, int num_votes, int num_clients, const int[][] client_info, int num_items, const int[][] item_info)
+public void Handler_VoteFinishedGeneric(Menu menu,
+						   int num_votes,
+						   int num_clients,
+						   const int[][] client_info,
+						   int num_items,
+						   const int[][] item_info)
 {
 	char map[PLATFORM_MAX_PATH];
 	char displayName[PLATFORM_MAX_PATH];
@@ -804,7 +803,12 @@ public void Handler_VoteFinishedGeneric(Menu menu, int num_votes, int num_client
 	}	
 }
 
-public void Handler_MapVoteFinished(Menu menu, int num_votes, int num_clients, const int[][] client_info, int num_items, const int[][] item_info)
+public void Handler_MapVoteFinished(Menu menu,
+						   int num_votes,
+						   int num_clients,
+						   const int[][] client_info,
+						   int num_items,
+						   const int[][] item_info)
 {
 	if (g_Cvar_RunOff.BoolValue && num_items > 1)
 	{
@@ -829,7 +833,7 @@ public void Handler_MapVoteFinished(Menu menu, int num_votes, int num_clients, c
 			
 			int voteDuration = g_Cvar_VoteDuration.IntValue;
 			g_VoteMenu.ExitButton = false;
-			DisplayVoteToPros(voteDuration, 0, g_VoteMenu);
+			g_VoteMenu.DisplayVoteToAll(voteDuration);
 			
 			/* Notify */
 			float map1percent = float(item_info[0][VOTEINFO_ITEM_VOTES])/ float(num_votes) * 100;
@@ -842,16 +846,7 @@ public void Handler_MapVoteFinished(Menu menu, int num_votes, int num_clients, c
 			return;
 		}
 	}
-
-
-	char map2[PLATFORM_MAX_PATH];
-	char displayName[PLATFORM_MAX_PATH];
-	// menu.GetItem(item_info[0][VOTEINFO_ITEM_INDEX], map, sizeof(map), _, displayName, sizeof(displayName));
-	menu.GetItem(item_info[1][VOTEINFO_ITEM_INDEX], map2, sizeof(map2), _, displayName, sizeof(displayName));
-
-	if (StrEqual(map2, VOTE_DONTCHANGE) || StrEqual(map2, VOTE_EXTEND))
-		item_info[0][VOTEINFO_ITEM_INDEX] = item_info[1][VOTEINFO_ITEM_INDEX];
-
+	
 	Handler_VoteFinishedGeneric(menu, num_votes, num_clients, client_info, num_items, item_info);
 }
 
@@ -916,6 +911,7 @@ public int Handler_MapVoteMenu(Menu menu, MenuAction action, int param1, int par
 						item = GetRandomInt(0, count - 1);
 						menu.GetItem(item, map, sizeof(map));
 					}
+					
 					SetNextMap(map);
 					g_MapVoteCompleted = true;
 				}
@@ -952,7 +948,6 @@ public Action Timer_ChangeMap(Handle hTimer, DataPack dp)
 		dp.ReadString(map, sizeof(map));		
 	}
 	
-	Format(map, sizeof(map), "%s.", map);
 	ForceChangeLevel(map, "Map Vote");
 	
 	return Plugin_Stop;
@@ -974,31 +969,42 @@ void CreateNextVote()
 {
 	g_NextMapList.Clear();
 	
-	char map[PLATFORM_MAX_PATH], map2[PLATFORM_MAX_PATH];
-
-	int limit = (g_Cvar_IncludeMaps.IntValue < g_MapList.Length ? g_Cvar_IncludeMaps.IntValue : g_MapList.Length);
-
-	//GetCurrentMap always returns a resolved map
-	GetCurrentMap(map2, sizeof(map2));
-	int i = 0;
-	int j = 0;
-	while(i < limit)
+	char map[PLATFORM_MAX_PATH];
+	// tempMaps is a resolved map list
+	ArrayList tempMaps = new ArrayList(ByteCountToCells(PLATFORM_MAX_PATH));
+	
+	for (int i = 0; i < g_MapList.Length; i++)
 	{
-		j++;
-		int b = GetRandomInt(0, g_MapList.Length - 1);
-		g_MapList.GetString(b, map, sizeof(map));
-
-		if (g_OldMapList.FindString(map) == -1 && g_NextMapList.FindString(map) == -1 && !StrEqual(map, map2))
+		g_MapList.GetString(i, map, sizeof(map));
+		if (FindMap(map, map, sizeof(map)) != FindMap_NotFound)
 		{
-			g_NextMapList.PushString(map);
-			i++;
-		}
-		else
-		{
-			if (j == 30)
-				break;
+			tempMaps.PushString(map);
 		}
 	}
+	
+	//GetCurrentMap always returns a resolved map
+	GetCurrentMap(map, sizeof(map));
+	RemoveStringFromArray(tempMaps, map);
+	
+	if (g_Cvar_ExcludeMaps.IntValue && tempMaps.Length > g_Cvar_ExcludeMaps.IntValue)
+	{
+		for (int i = 0; i < g_OldMapList.Length; i++)
+		{
+			g_OldMapList.GetString(i, map, sizeof(map));
+			RemoveStringFromArray(tempMaps, map);
+		}
+	}
+
+	int limit = (g_Cvar_IncludeMaps.IntValue < tempMaps.Length ? g_Cvar_IncludeMaps.IntValue : tempMaps.Length);
+	for (int i = 0; i < limit; i++)
+	{
+		int b = GetRandomInt(0, tempMaps.Length - 1);
+		tempMaps.GetString(b, map, sizeof(map));		
+		g_NextMapList.PushString(map);
+		tempMaps.Erase(b);
+	}
+	
+	delete tempMaps;
 }
 
 bool CanVoteStart()
@@ -1236,25 +1242,34 @@ public void db_setupDatabase()
 	g_hDb = SQL_Connect("surftimer", false, szError, 255);
 
 	if (g_hDb == null)
-		SetFailState("[Mapchooser] Unable to connect to database (%s)", szError);
+		SetFailState("[SurfTimer Mapchooser] Unable to connect to database (%s)", szError);
 	
 	return;
 }
 
 public void SelectMapList()
 {
-	char szQuery[256], szTier[16], szBuffer[2][32];
 
-	g_Cvar_ServerTier = FindConVar("sm_server_tier");
-	GetConVarString(g_Cvar_ServerTier, szTier, sizeof(szTier));
-	ExplodeString(szTier, ".", szBuffer, 2, 32);
+	// Create a where statement to only fetch info for maps in the mapcycle
+	char szMaplist[20000], map[PLATFORM_MAX_PATH];
 
-	if (StrEqual(szBuffer[1], "0"))
-		Format(szQuery, sizeof(szQuery), "SELECT mapname, tier FROM ck_maptier WHERE tier = %s;", szBuffer[0]);
-	else if (strlen(szBuffer[1]) > 0)
-		Format(szQuery, sizeof(szQuery), "SELECT mapname, tier FROM ck_maptier WHERE tier >= %s AND tier <= %s;", szBuffer[0], szBuffer[1]);
-	else
-		Format(szQuery, sizeof(szQuery), "SELECT mapname, tier FROM ck_maptier;");
+	g_MapList.GetString(0, map, sizeof(map));
+	Format(szMaplist, sizeof(szMaplist), "%s", map);
+
+	for (int d = 1; d < g_MapList.Length; d++)
+	{
+		g_MapList.GetString(d, map, sizeof(map));
+		PrintToServer(map);
+		Format(szMaplist, sizeof(szMaplist), "%s, %s", szMaplist, map);
+	}
+
+	Format(szMaplist, sizeof(szMaplist), "WHERE z.mapname IN (%s)", szMaplist);
+
+	PrintToServer("-------------------------");
+	PrintToServer(szMaplist);
+
+
+	char szQuery[] = "SELECT z.mapname, IFNULL(t.tier, '-1'), COUNT(CASE WHEN z.zonetype = 3 THEN 1 ELSE NULL END)+1, count(DISTINCT z.zonegroup)-1 FROM ck_zones z LEFT JOIN ck_maptier t ON z.mapname = t.mapname GROUP BY z.mapname ORDER BY t.tier, z.mapname ASC;";
 
 	SQL_TQuery(g_hDb, SelectMapListCallback, szQuery, DBPrio_Low);
 }
@@ -1263,23 +1278,40 @@ public void SelectMapListCallback(Handle owner, Handle hndl, const char[] error,
 {
 	if (hndl == null)
 	{
-		LogError("[Nominations] SQL Error (SelectMapListCallback): %s", error);
+		LogError("[Surftimer Mapchooser] SQL Error (SelectMapListCallback): %s", error);
 		return;
 	}
 
 	if (SQL_HasResultSet(hndl))
 	{
-		g_MapList.Clear();
 		g_MapListTier.Clear();
 
-		char szMapName[128], szValue[256];
-		int tier = 0;
+		char szMapName[128], szValue[256], szTierLabel[8], szStageLabel[8], szBonusLabel[8];
+		int tier, stages, bonuses;
 		while (SQL_FetchRow(hndl))
 		{
 			SQL_FetchString(hndl, 0, szMapName, sizeof(szMapName));
 			tier = SQL_FetchInt(hndl, 1);
-			Format(szValue, sizeof(szValue), "%s - Tier %d", szMapName, tier);
-			g_MapList.PushString(szMapName);
+			stages = SQL_FetchInt(hndl, 2);
+			bonuses = SQL_FetchInt(hndl, 3);
+
+			// Label for tiers, stages & bonuses
+			if (tier != -1) 
+				Format(szTierLabel, sizeof(szTierLabel), "T%d ", tier);
+			else 
+				Format(szTierLabel, sizeof(szTierLabel), "");
+
+			if (stages > 1) 
+				Format(szStageLabel, sizeof(szStageLabel), "%dS", stages);
+			else
+				Format(szStageLabel, sizeof(szStageLabel), "L");
+
+			if (bonuses > 0) 
+				Format(szBonusLabel, sizeof(szBonusLabel), " %dB", bonuses);
+			else
+				Format(szBonusLabel, sizeof(szBonusLabel), "");
+
+			Format(szValue, sizeof(szValue), "%s (%s%s%s)", szMapName, szTierLabel, szStageLabel, szBonusLabel);
 			g_MapListTier.PushString(szValue);
 		}
 	}
@@ -1302,36 +1334,4 @@ public void GetMapDisplayNameTier(char[] szMapName, char szBuffer[PLATFORM_MAX_P
 
 	if (!bFound)
 		Format(szBuffer, sizeof(szBuffer), "Invalid Map");
-}
-
-public bool DisplayVoteToPros(int time, int flags, Menu menu) 
-{
-	int total = 0;
-	int[] players = new int[MaxClients];
-	g_Cvar_PointsRequirement = FindConVar("sm_rtv_point_requirement");
-	g_Cvar_RankRequirement = FindConVar("sm_rtv_rank_requirement");
-	for (int i = 1; i <= MaxClients; i++) 
-	{
-		if (!IsClientInGame(i) || IsFakeClient(i))
-			continue;
-
-		if (g_Cvar_PointsRequirement != null && GetConVarInt(g_Cvar_PointsRequirement) > 0)
-		{
-			if (surftimer_GetPlayerPoints(i) < GetConVarInt(g_Cvar_PointsRequirement))
-			{
-				continue;
-			}
-		}
-
-		if (g_Cvar_RankRequirement != null && GetConVarInt(g_Cvar_RankRequirement) > 0)
-		{
-			if (surftimer_GetPlayerRank(i) > GetConVarInt(g_Cvar_RankRequirement))
-			{
-				continue;
-			}
-		}
-
-		players[total++] = i;
-	}
-	menu.DisplayVote(players, total, time, flags);
 }
